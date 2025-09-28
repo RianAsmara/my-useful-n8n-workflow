@@ -1,0 +1,666 @@
+{
+  "name": "Nyatet Duit",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "90065e3d-9181-4573-9e91-63f86a8818ba",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        512
+      ],
+      "webhookId": "6f4b7884-ee38-4633-b34a-3d566ad7b3d8",
+      "credentials": {
+        "telegramApi": {
+          "id": "pRHen43wScZitpAn",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot8261934459:AAFOp6B2BWNv-W4Yf6MLsAZz-nOE_857zX8/getFile?file_id={{$json.file_id}}",
+        "options": {}
+      },
+      "id": "88191afe-207c-47dd-8dd3-cc2ab29f64df",
+      "name": "Get File Path",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        288,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/file/bot8261934459:AAFOp6B2BWNv-W4Yf6MLsAZz-nOE_857zX8/{{ $json.result.file_path }}",
+        "responseFormat": "file",
+        "options": {}
+      },
+      "id": "2106b1f8-3cec-4f1e-927b-522d55991f6b",
+      "name": "Download File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        512,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "https://api.ocr.space/parse/image",
+        "jsonParameters": true,
+        "options": {
+          "bodyContentType": "multipart-form-data"
+        },
+        "sendBinaryData": true,
+        "headerParametersJson": "{\n  \"apikey\": \"K8118301188957\",\n  \"language\": \"en\",\n  \"filetype\": \"JPG\",\n  \"isOverlayRequired\" : false\n}"
+      },
+      "id": "6de52c66-b1e6-4cf1-8ea7-81568ee66563",
+      "name": "OCR.space",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        736,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const text = $json.ParsedResults?.[0]?.ParsedText || '';\nconst lines = text.split(/\\r?\\n/).map(l => l.trim()).filter(Boolean);\n\nlet tanggal = null;\nlet waktu = null;\nlet no_ref = null;\nlet penerima = null;\nlet bank_penerima = null;\nlet nominal = null;\nlet pengirim = null;\n\n// 1. Tanggal & waktu\nconst tglMatch = text.match(/(\\d{1,2}\\s+[A-Za-z]+)(?:\\s*•\\s*(\\d{1,2}:\\d{2}:\\d{2})?)?/i);\nif (tglMatch) {\n  const thisYear = new Date().getFullYear();\n  const rawDate = new Date(`${tglMatch[1]} ${thisYear}`);\n  tanggal = !isNaN(rawDate) ? rawDate.toISOString().slice(0, 10) : null;\n  waktu = tglMatch[2] || null;\n}\n\n// 2. Nomor Referensi (cari di baris dengan 're', 'ref', 'ret' atau langsung angka 18 digit)\nfor (const line of lines) {\n  if (/re['f']?|ret/i.test(line)) {\n    const refMatch = line.match(/(\\d{15,20})/);\n    if (refMatch) {\n      no_ref = refMatch[1];\n      break;\n    }\n  }\n}\n\n// 3. Penerima / Deskripsi (toleransi typo \"Penerima\")\nconst idxPenerima = lines.findIndex(l => /pener[i1]r?m?a?/i.test(l));\nif (idxPenerima !== -1 && lines[idxPenerima + 1]) {\n  penerima = lines[idxPenerima + 1];\n}\n\n// 4. Bank Penerima (toleransi typo \"Mandir'\")\nconst bankMatch = text.match(/Bank\\s+Mandir[^\\s\\-]*\\s*-\\s*(\\d{10,})/i);\nif (bankMatch) {\n  bank_penerima = bankMatch[1];\n}\n\n// 5. Nominal\nconst nominalMatches = [...text.matchAll(/Rp\\s*([0-9O.,]+)/gi)];\nif (nominalMatches.length) {\n  const amounts = nominalMatches.map(m => {\n    const normalized = m[1]\n      .replace(/[Oo]/g, '0')        // Ganti huruf O atau o jadi nol\n      .replace(/[^\\d]/g, '');       // Hilangkan titik, koma, dll\n    return parseInt(normalized);\n  }).filter(n => !isNaN(n));\n  if (amounts.length) {\n    nominal = Math.max(...amounts); // Ambil nilai terbesar\n  }\n}\n\n// 6. Pengirim (deteksi 'RIAN ASMARA PUTRA' atau setelah nominal)\nconst rianLine = lines.find(l => /rian asmara putra/i.test(l));\nif (rianLine) {\n  pengirim = \"RIAN ASMARA PUTRA\";\n} else {\n  const nominalLineIdx = lines.findIndex(l => l.includes('Rp') && /\\d/.test(l));\n  if (nominalLineIdx !== -1 && lines[nominalLineIdx + 1]) {\n    pengirim = lines[nominalLineIdx + 1];\n  }\n}\n\n// 7. Kategori otomatis\nlet kategori = '';\nif (penerima?.toLowerCase().includes(\"miniso\")) kategori = 'Belanja';\nelse if (penerima?.toLowerCase().includes(\"flip\") || bank_penerima) kategori = 'Transfer';\nelse kategori = 'Lainnya';\n\n// 8. Jenis transaksi\nconst jenis = 'Pengeluaran';\n\n// 9. Metode\nconst metode = 'QRIS Mandiri';\n\n// 10. Akun sumber\nconst akun_sumber = 'Mandiri';\n\n// 🔄 Return akhir\nreturn [\n  {\n    json: {\n      tanggal: tanggal || new Date().toISOString().slice(0, 10),\n      waktu,\n      deskripsi: penerima || '',\n      kategori,\n      jenis,\n      nominal,\n      metode,\n      ref: no_ref || '',\n      akun_sumber\n    }\n  }\n];\n"
+      },
+      "id": "31963e15-9c78-4052-9d68-d7691e8c07e6",
+      "name": "Parse OCR Text",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        960,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1EuWwmNDu7zPd_W0OkXa_nVsbiKGnOVq49exO-JWK1H8",
+          "mode": "list",
+          "cachedResultName": "Nyatet Duit",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1EuWwmNDu7zPd_W0OkXa_nVsbiKGnOVq49exO-JWK1H8/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1EuWwmNDu7zPd_W0OkXa_nVsbiKGnOVq49exO-JWK1H8/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "tanggal"
+          ],
+          "schema": [
+            {
+              "id": "tanggal",
+              "displayName": "tanggal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "deskripsi",
+              "displayName": "deskripsi",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "nominal",
+              "displayName": "nominal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "FileId",
+              "displayName": "FileId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "FileName",
+              "displayName": "FileName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Username",
+              "displayName": "Username",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ChatId",
+              "displayName": "ChatId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "MessageId",
+              "displayName": "MessageId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1184,
+        512
+      ],
+      "id": "c10125c6-b89e-49e8-9efe-5f8f20226367",
+      "name": "Append row in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "um1CxtH1HD7hUdgX",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const date = new Date($json.message_date_iso);\nconst formatter = new Intl.DateTimeFormat('id-ID', { year: 'numeric', month: 'long' });\nconst bulan = formatter.format(date); // e.g. \"September 2025\"\n\nreturn [{\n  json: {\n    ...$json,\n    bulan\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        288
+      ],
+      "id": "b3ee0aef-ed0f-47b4-b6e9-d5a5f80c9b93",
+      "name": "Code in JavaScript",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "resource": "fileFolder",
+        "queryString": "Keuangan",
+        "filter": {},
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        64,
+        288
+      ],
+      "id": "f7982821-3658-497b-9760-e4dc35e0341b",
+      "name": "Search files and folders",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "QcjWSvshgsFgdHC8",
+          "name": "Google Drive account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "8aa07c60-5327-48af-a179-cd2b8932bf2e",
+              "leftValue": "={{$json.matches.length}}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        288,
+        288
+      ],
+      "id": "821092fd-a9a0-4d98-9f90-20a92c155e00",
+      "name": "Folder Exist",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "name": "={{ $json.bulan }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "1Z7TLFZb-sq36NO7vrEnLbodl1j9-6p-L",
+          "mode": "list",
+          "cachedResultName": "Keuangan",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1Z7TLFZb-sq36NO7vrEnLbodl1j9-6p-L"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        512,
+        288
+      ],
+      "id": "b1e13723-3392-4e2c-aabd-1437983b85f8",
+      "name": "Create folder",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "QcjWSvshgsFgdHC8",
+          "name": "Google Drive account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "functionCode": "\nreturn [{\n  json: {\n    ...$json,\n    folderId: $json.id || $json.matches?.[0]?.id\n  }\n}];\n"
+      },
+      "id": "32192b3e-1572-4c1b-ad6c-972efc7520f7",
+      "name": "Set Folder ID",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        736,
+        288
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "mode": "mergeByPosition"
+      },
+      "id": "c0f5124f-9f7e-4f8d-b035-615601b132b2",
+      "name": "Merge File + Folder",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 1,
+      "position": [
+        960,
+        288
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list"
+        },
+        "folderId": "={{ $json.folderId }}",
+        "options": {}
+      },
+      "id": "965930c7-e6f8-4a1d-8b96-694419f0f234",
+      "name": "Upload to Folder Bulan",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1184,
+        288
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "QcjWSvshgsFgdHC8",
+          "name": "Google Drive account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const msg = $input.item.json.message || {};\nconsole.log('DEBUG: RAW TELEGRAM MESSAGE', msg);\n\nlet file_id = null;\nlet file_type = null;\n\nif (msg.photo?.length) {\n  const sorted = msg.photo.sort((a, b) => (a.file_size || 0) - (b.file_size || 0));\n  const safeIndex = sorted.length >= 3 ? sorted.length - 2 : sorted.length - 1;\n  const photo = sorted[safeIndex];\n  file_id = photo.file_id;\n  file_type = 'photo';\n} else if (msg.document?.file_id) {\n  file_id = msg.document.file_id;\n  file_type = 'document';\n}\n\nif (!file_id) {\n  console.log('⚠️ No file found in photo or document');\n  return [{ json: { error: 'No file_id found', raw: msg } }];\n}\n\nconsole.log(`✅ Picked ${file_type} file_id:`, file_id);\n\nreturn [{\n  json: {\n    file_id,\n    file_type,\n    chat_id: msg.chat?.id,\n    username: msg.chat?.username || msg.chat?.first_name || 'unknown',\n    message_id: msg.message_id,\n    message_date_iso: new Date((msg.date || Date.now()) * 1000).toISOString().slice(0, 10)\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        512
+      ],
+      "id": "c62cee57-2923-49a5-8ecb-bf730a4e8242",
+      "name": "Pick Photo2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = $json.ParsedResults?.[0]?.ParsedText || '';\n\nconst tanggalMatch = text.match(/(\\d{1,2}\\s+[a-z]+\\s+202\\d)/i);\nconst waktuMatch = text.match(/(\\d{1,2}:\\d{2}:\\d{2})/);\nconst refMatch = text.match(/No\\.? Ref\\.?\\s*(\\d{15,20})/i);\nconst nominalMatch = text.match(/Rp\\s*([\\d.,O]+)/i);\nconst penerimaMatch = text.match(/MINISO.*|ke\\s+(.*)/i); // fallback\n\nfunction parseNominal(str) {\n  return parseInt(\n    str\n      .replace(/[Oo]/g, '0')\n      .replace(/[^\\d]/g, '')\n  ) || 0;\n}\n\nfunction formatCurrency(num) {\n  return 'Rp' + num.toLocaleString('id-ID');\n}\n\n// Konversi tanggal ke format ISO (2025-09-27)\nfunction parseTanggal(str) {\n  const bulan = {\n    jan: '01', feb: '02', mar: '03', apr: '04',\n    mei: '05', may: '05', jun: '06', jul: '07',\n    agu: '08', aug: '08', sep: '09', okt: '10',\n    oct: '10', nov: '11', des: '12', dec: '12'\n  };\n  const m = str.toLowerCase().split(' ');\n  const d = m[0].padStart(2, '0');\n  const mo = bulan[m[1].slice(0, 3)];\n  const y = m[2];\n  return `${y}-${mo}-${d}`;\n}\n\n// Build data\nconst data = {\n  tanggal: tanggalMatch ? parseTanggal(tanggalMatch[1]) : new Date().toISOString().slice(0, 10),\n  waktu: waktuMatch ? waktuMatch[1] : '',\n  deskripsi: penerimaMatch ? penerimaMatch[0].replace(/ke\\s+/i, '').trim() : '',\n  kategori: 'QR',\n  jenis: 'Pengeluaran',\n  nominal: nominalMatch ? formatCurrency(parseNominal(nominalMatch[1])) : '',\n  metode: 'QRIS Mandiri',\n  ref: refMatch ? refMatch[1] : '',\n  akun_sumber: 'Mandiri'\n};\n\nreturn [{ json: data }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        64
+      ],
+      "id": "57ab116e-a117-40d3-89c8-3fec91ee5c73",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list",
+          "cachedResultName": "My Drive",
+          "cachedResultUrl": "https://drive.google.com/drive/my-drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "1Z7TLFZb-sq36NO7vrEnLbodl1j9-6p-L",
+          "mode": "list",
+          "cachedResultName": "Keuangan",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1Z7TLFZb-sq36NO7vrEnLbodl1j9-6p-L"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -160,
+        -160
+      ],
+      "id": "8c21a220-e436-4e97-9c94-cebb1950968b",
+      "name": "Upload file",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "QcjWSvshgsFgdHC8",
+          "name": "Google Drive account"
+        }
+      },
+      "disabled": true
+    }
+  ],
+  "pinData": {
+    "Telegram Trigger": [
+      {
+        "json": {
+          "update_id": 268405743,
+          "message": {
+            "message_id": 5,
+            "from": {
+              "id": 260508938,
+              "is_bot": false,
+              "first_name": "Rian Asmara",
+              "last_name": "Putra",
+              "username": "rianasmaraputra",
+              "language_code": "en"
+            },
+            "chat": {
+              "id": 260508938,
+              "first_name": "Rian Asmara",
+              "last_name": "Putra",
+              "username": "rianasmaraputra",
+              "type": "private"
+            },
+            "date": 1758966430,
+            "photo": [
+              {
+                "file_id": "AgACAgUAAxkBAAMFaNeynoaLbMn5ZuvZ9bSJYmkPtLgAAjPOMRupmMBWqo86kF6le1cBAAMCAANzAAM2BA",
+                "file_unique_id": "AQADM84xG6mYwFZ4",
+                "file_size": 702,
+                "width": 42,
+                "height": 90
+              },
+              {
+                "file_id": "AgACAgUAAxkBAAMFaNeynoaLbMn5ZuvZ9bSJYmkPtLgAAjPOMRupmMBWqo86kF6le1cBAAMCAANtAAM2BA",
+                "file_unique_id": "AQADM84xG6mYwFZy",
+                "file_size": 8166,
+                "width": 149,
+                "height": 320
+              },
+              {
+                "file_id": "AgACAgUAAxkBAAMFaNeynoaLbMn5ZuvZ9bSJYmkPtLgAAjPOMRupmMBWqo86kF6le1cBAAMCAAN4AAM2BA",
+                "file_unique_id": "AQADM84xG6mYwFZ9",
+                "file_size": 33294,
+                "width": 372,
+                "height": 800
+              },
+              {
+                "file_id": "AgACAgUAAxkBAAMFaNeynoaLbMn5ZuvZ9bSJYmkPtLgAAjPOMRupmMBWqo86kF6le1cBAAMCAAN5AAM2BA",
+                "file_unique_id": "AQADM84xG6mYwFZ-",
+                "file_size": 64821,
+                "width": 595,
+                "height": 1280
+              },
+              {
+                "file_id": "AgACAgUAAxkBAAMFaNeynoaLbMn5ZuvZ9bSJYmkPtLgAAjPOMRupmMBWqo86kF6le1cBAAMCAAN3AAM2BA",
+                "file_unique_id": "AQADM84xG6mYwFZ8",
+                "file_size": 152411,
+                "width": 1191,
+                "height": 2560
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Pick Photo2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get File Path": {
+      "main": [
+        [
+          {
+            "node": "Download File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download File": {
+      "main": [
+        [
+          {
+            "node": "OCR.space",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OCR.space": {
+      "main": [
+        [
+          {
+            "node": "Parse OCR Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse OCR Text": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Search files and folders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search files and folders": {
+      "main": [
+        [
+          {
+            "node": "Folder Exist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Folder Exist": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Create folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create folder": {
+      "main": [
+        [
+          {
+            "node": "Set Folder ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Folder ID": {
+      "main": [
+        [
+          {
+            "node": "Merge File + Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge File + Folder": {
+      "main": [
+        [
+          {
+            "node": "Upload to Folder Bulan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Photo2": {
+      "main": [
+        [
+          {
+            "node": "Get File Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "timezone": "Asia/Jakarta",
+    "saveExecutionProgress": true,
+    "errorWorkflow": "vwaegxtB8GvV7lKw"
+  },
+  "versionId": "f9541d01-27ea-40e9-9fec-91559db8a5fb",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "26e11b561dc9a0865638849b23ae1eeefc9e9ecd9cf80357397d60106c4d37c9"
+  },
+  "id": "vwaegxtB8GvV7lKw",
+  "tags": [
+    {
+      "createdAt": "2025-09-28T04:08:24.226Z",
+      "updatedAt": "2025-09-28T04:08:24.226Z",
+      "id": "Bdt2Ogcw5JPIq2yx",
+      "name": "ocr"
+    },
+    {
+      "name": "telegram",
+      "id": "pzZBaTCpBhtAwrAy",
+      "createdAt": "2025-09-28T04:08:42.439Z",
+      "updatedAt": "2025-09-28T04:08:42.439Z"
+    },
+    {
+      "name": "cashflow",
+      "id": "rHYY8EMWqB6njpzx",
+      "createdAt": "2025-09-28T04:08:51.824Z",
+      "updatedAt": "2025-09-28T04:08:51.824Z"
+    }
+  ]
+}
